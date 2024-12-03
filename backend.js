@@ -1,169 +1,204 @@
-const express = require('express')
-const app = express()
+const express = require('express');
+const app = express();
 
 // socket.io setup
-const http = require('http')
-const server = http.createServer(app)
-const { Server } = require('socket.io')
-const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 })
+const http = require('http');
+const server = http.createServer(app);
+const { Server } = require('socket.io');
+const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 });
 
-const port = 3000
+const port = process.env.PORT || 3000;
+const { MongoClient } = require('mongodb');
 
-app.use(express.static('public'))
+const uri = process.env.MONGO_URI; // Ensure this environment variable is set
+const client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology: true });
+
+
+let playersCollection;
+
+// Connect to MongoDB
+async function connectDB() {
+    try {
+        await client.connect();
+        console.log('Connected to MongoDB');
+        const db = client.db('gameDB');
+        playersCollection = db.collection('players');
+    } catch (err) {
+        console.error('Failed to connect to MongoDB', err);
+        process.exit(1);
+    }
+}
+
+connectDB();
+
+app.use(express.static('public'));
 
 app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/index.html')
-})
+    res.sendFile(__dirname + '/index.html');
+});
 
-const backEndPlayers = {}
-const backEndProjectiles = {}
+const backEndPlayers = {};
+const backEndProjectiles = {};
 
-const SPEED = 5
-const RADIUS = 10
-const PROJECTILE_RADIUS = 5
-let projectileId = 0
+const SPEED = 5;
+const RADIUS = 10;
+const PROJECTILE_RADIUS = 5;
+let projectileId = 0;
 
+// Save player score to the database
+async function savePlayerScore(username, score) {
+    try {
+        await playersCollection.updateOne(
+            { username },
+            { $set: { score } },
+            { upsert: true } // Insert if the username doesn't exist
+        );
+        console.log(`Saved score for ${username}: ${score}`);
+    } catch (err) {
+        console.error('Error saving player score:', err);
+    }
+}
+
+// Handle socket connections
 io.on('connection', (socket) => {
-  console.log('a user connected')
+    console.log('A user connected');
 
-  io.emit('updatePlayers', backEndPlayers)
+    io.emit('updatePlayers', backEndPlayers);
 
-  socket.on('shoot', ({ x, y, angle }) => {
-    projectileId++
+    socket.on('shoot', ({ x, y, angle }) => {
+        projectileId++;
 
-    const velocity = {
-      x: Math.cos(angle) * 5,
-      y: Math.sin(angle) * 5
-    }
+        const velocity = {
+            x: Math.cos(angle) * 5,
+            y: Math.sin(angle) * 5,
+        };
 
-    backEndProjectiles[projectileId] = {
-      x,
-      y,
-      velocity,
-      playerId: socket.id
-    }
+        backEndProjectiles[projectileId] = {
+            x,
+            y,
+            velocity,
+            playerId: socket.id,
+        };
+    });
 
-    console.log(backEndProjectiles)
-  })
+    socket.on('initGame', ({ username, width, height,screen_width,screen_height }) => {
+        backEndPlayers[socket.id] = {
+            x: Math.random() * 1024, // Ensure within horizontal bounds
+            y: Math.random() * 768, 
+            color: `hsl(${360 * Math.random()}, 100%, 50%)`,
+            sequenceNumber: 0,
+            score: 0,
+            username,
+            sc_width: screen_width,
+            sc_height: screen_height,
+            canvas: { width, height },
+            radius: RADIUS,
+        };
 
-  socket.on('initGame', ({ username, width, height }) => {
-    backEndPlayers[socket.id] = {
-      x: 1024 * Math.random(),
-      y: 576 * Math.random(),
-      color: `hsl(${360 * Math.random()}, 100%, 50%)`,
-      sequenceNumber: 0,
-      score: 0,
-      username
-    }
+    });
 
-    // where we init our canvas
-    backEndPlayers[socket.id].canvas = {
-      width,
-      height
-    }
+    socket.on('disconnect', async () => {
+        console.log(`User ${socket.id} disconnected`);
 
-    backEndPlayers[socket.id].radius = RADIUS
-  })
+        if (backEndPlayers[socket.id]) {
+            const { username, score } = backEndPlayers[socket.id];
+            await savePlayerScore(username, score); // Save the player's score
+        }
 
-  socket.on('disconnect', (reason) => {
-    console.log(reason)
-    delete backEndPlayers[socket.id]
-    io.emit('updatePlayers', backEndPlayers)
-  })
+        delete backEndPlayers[socket.id];
+        io.emit('updatePlayers', backEndPlayers);
+    });
 
-  socket.on('keydown', ({ keycode, sequenceNumber }) => {
-    const backEndPlayer = backEndPlayers[socket.id]
+    socket.on('keydown', ({ keycode, sequenceNumber }) => {
+        const backEndPlayer = backEndPlayers[socket.id];
+        if (!backEndPlayer) return;
 
-    if (!backEndPlayers[socket.id]) return
+        const { width, height } = backEndPlayer.canvas;
 
-    backEndPlayers[socket.id].sequenceNumber = sequenceNumber
-    switch (keycode) {
-      case 'KeyW':
-        backEndPlayers[socket.id].y -= SPEED
-        break
+        backEndPlayer.sequenceNumber = sequenceNumber;
+        switch (keycode) {
+          case 'KeyW': // Move up
+              backEndPlayer.y = Math.max(backEndPlayer.y - SPEED, backEndPlayer.radius);
+              break;
+  
+          case 'KeyA': // Move left
+              backEndPlayer.x = Math.max(backEndPlayer.x - SPEED, backEndPlayer.radius);
+              break;
+  
+          case 'KeyS': // Move down
+              backEndPlayer.y = Math.min(backEndPlayer.y + SPEED, backEndPlayer.canvas.height - backEndPlayer.radius);
+              break;
+  
+          case 'KeyD': // Move right
+              backEndPlayer.x = Math.min(backEndPlayer.x + SPEED, backEndPlayer.canvas.width - backEndPlayer.radius);
+              break;
+        }
 
-      case 'KeyA':
-        backEndPlayers[socket.id].x -= SPEED
-        break
+        const playerSides = {
+            left: backEndPlayer.x - backEndPlayer.radius,
+            right: backEndPlayer.x + backEndPlayer.radius,
+            top: backEndPlayer.y - backEndPlayer.radius,
+            bottom: backEndPlayer.y + backEndPlayer.radius,
+        };
+        //console.log(backEndPlayer.sc_height);
+        if (playerSides.left < 0) backEndPlayer.x = backEndPlayer.radius;
+        if (playerSides.right > backEndPlayer.sc_width) backEndPlayer.x = backEndPlayer.sc_width - backEndPlayer.radius;
+        if (playerSides.top < 0) backEndPlayer.y = backEndPlayer.radius;
+        if (playerSides.bottom > backEndPlayer.sc_height) backEndPlayer.y = backEndPlayer.sc_height - backEndPlayer.radius;
+    });
+});
 
-      case 'KeyS':
-        backEndPlayers[socket.id].y += SPEED
-        break
-
-      case 'KeyD':
-        backEndPlayers[socket.id].x += SPEED
-        break
-    }
-
-    const playerSides = {
-      left: backEndPlayer.x - backEndPlayer.radius,
-      right: backEndPlayer.x + backEndPlayer.radius,
-      top: backEndPlayer.y - backEndPlayer.radius,
-      bottom: backEndPlayer.y + backEndPlayer.radius
-    }
-
-    if (playerSides.left < 0) backEndPlayers[socket.id].x = backEndPlayer.radius
-
-    if (playerSides.right > 1024)
-      backEndPlayers[socket.id].x = 1024 - backEndPlayer.radius
-
-    if (playerSides.top < 0) backEndPlayers[socket.id].y = backEndPlayer.radius
-
-    if (playerSides.bottom > 576)
-      backEndPlayers[socket.id].y = 576 - backEndPlayer.radius
-  })
-})
-
-// backend ticker
+// Backend ticker
 setInterval(() => {
-  // update projectile positions
-  for (const id in backEndProjectiles) {
-    backEndProjectiles[id].x += backEndProjectiles[id].velocity.x
-    backEndProjectiles[id].y += backEndProjectiles[id].velocity.y
+    for (const id in backEndProjectiles) {
+        const projectile = backEndProjectiles[id];
+        const player = backEndPlayers[projectile.playerId];
+        if (!player) continue;
 
-    const PROJECTILE_RADIUS = 5
-    if (
-      backEndProjectiles[id].x - PROJECTILE_RADIUS >=
-        backEndPlayers[backEndProjectiles[id].playerId]?.canvas?.width ||
-      backEndProjectiles[id].x + PROJECTILE_RADIUS <= 0 ||
-      backEndProjectiles[id].y - PROJECTILE_RADIUS >=
-        backEndPlayers[backEndProjectiles[id].playerId]?.canvas?.height ||
-      backEndProjectiles[id].y + PROJECTILE_RADIUS <= 0
-    ) {
-      delete backEndProjectiles[id]
-      continue
+        const { width, height } = player.canvas;
+
+        projectile.x += projectile.velocity.x;
+        projectile.y += projectile.velocity.y;
+
+        if (
+            projectile.x - PROJECTILE_RADIUS >= width ||
+            projectile.x + PROJECTILE_RADIUS <= 0 ||
+            projectile.y - PROJECTILE_RADIUS >= height ||
+            projectile.y + PROJECTILE_RADIUS <= 0
+        ) {
+            delete backEndProjectiles[id];
+            continue;
+        }
+
+        for (const playerId in backEndPlayers) {
+            const backEndPlayer = backEndPlayers[playerId];
+
+            const DISTANCE = Math.hypot(
+                projectile.x - backEndPlayer.x,
+                projectile.y - backEndPlayer.y
+            );
+
+            // Collision detection
+            if (
+                DISTANCE < PROJECTILE_RADIUS + backEndPlayer.radius &&
+                projectile.playerId !== playerId
+            ) {
+                if (backEndPlayers[projectile.playerId])
+                    backEndPlayers[projectile.playerId].score++;
+
+                delete backEndProjectiles[id];
+                delete backEndPlayers[playerId];
+                break;
+            }
+        }
     }
 
-    for (const playerId in backEndPlayers) {
-      const backEndPlayer = backEndPlayers[playerId]
-
-      const DISTANCE = Math.hypot(
-        backEndProjectiles[id].x - backEndPlayer.x,
-        backEndProjectiles[id].y - backEndPlayer.y
-      )
-
-      // collision detection
-      if (
-        DISTANCE < PROJECTILE_RADIUS + backEndPlayer.radius &&
-        backEndProjectiles[id].playerId !== playerId
-      ) {
-        if (backEndPlayers[backEndProjectiles[id].playerId])
-          backEndPlayers[backEndProjectiles[id].playerId].score++
-
-        console.log(backEndPlayers[backEndProjectiles[id].playerId])
-        delete backEndProjectiles[id]
-        delete backEndPlayers[playerId]
-        break
-      }
-    }
-  }
-
-  io.emit('updateProjectiles', backEndProjectiles)
-  io.emit('updatePlayers', backEndPlayers)
-}, 15)
+    io.emit('updateProjectiles', backEndProjectiles);
+    io.emit('updatePlayers', backEndPlayers);
+}, 15);
 
 server.listen(port, () => {
-  console.log(`Example app listening on port ${port}`)
-})
+    console.log(`Server running on port ${port}`);
+});
 
-console.log('server did load')
+console.log('Server did load');

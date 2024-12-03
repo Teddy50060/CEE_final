@@ -1,0 +1,22 @@
+body {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    margin: 0;
+    background: #94a3b8;
+  }
+  
+  input::placeholder {
+    color: #94a3b8;
+  }
+  
+  canvas {
+    width: 100vw;
+    height: 100vh;
+    background-image: url('/img/webb-dark.png');
+    user-select: none;
+    cursor: crosshair; /* Indicate interactive behavior */
+    display: block; /* Remove extra space below canvas */
+  }
+  
+  
